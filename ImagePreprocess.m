@@ -184,5 +184,109 @@ classdef ImagePreprocess
             % 6. 像素值归一化
             processImg = ImagePreprocess.normalizePixels(img);
         end
+        
+        %% 新增：核心需求 1 & 2 - 人脸检测与对齐 (Face Alignment)
+        function [alignedFace, success] = detectAndAlignFace(img)
+            % detectAndAlignFace: 检测人脸，进行关键点对齐(基于双眼)，并裁剪缩放为 224x224 (适配 ResNet-50)
+            success = false;
+            alignedFace = [];
+            
+            % 1. 检测人脸
+            persistent faceDetector;
+            if isempty(faceDetector)
+                faceDetector = vision.CascadeObjectDetector('MergeThreshold', 4);
+            end
+            
+            bbox = step(faceDetector, img);
+            if isempty(bbox)
+                return;
+            end
+            
+            % 取最大的一个人脸框
+            areas = bbox(:,3) .* bbox(:,4);
+            [~, maxIdx] = max(areas);
+            faceBBox = bbox(maxIdx, :);
+            
+            % 提取人脸区域以进行后续对齐
+            faceImg = imcrop(img, faceBBox);
+            
+            % 2. 人脸对齐 (基于双眼检测进行仿射变换)
+            persistent eyeDetector;
+            if isempty(eyeDetector)
+                eyeDetector = vision.CascadeObjectDetector('EyePairBig');
+            end
+            
+            eyeBBox = step(eyeDetector, faceImg);
+            if ~isempty(eyeBBox)
+                % 取最大的双眼框
+                eyeAreas = eyeBBox(:,3) .* eyeBBox(:,4);
+                [~, maxEyeIdx] = max(eyeAreas);
+                eBox = eyeBBox(maxEyeIdx, :);
+                
+                % 估算左右眼中心位置
+                leftEyeCenter = [eBox(1) + eBox(3)*0.25, eBox(2) + eBox(4)*0.5];
+                rightEyeCenter = [eBox(1) + eBox(3)*0.75, eBox(2) + eBox(4)*0.5];
+                
+                % 计算倾斜角度
+                dY = rightEyeCenter(2) - leftEyeCenter(2);
+                dX = rightEyeCenter(1) - leftEyeCenter(1);
+                angle = atan2d(dY, dX);
+                
+                % 旋转原始图像进行对齐 (只旋转人脸部分)
+                alignedFaceImg = imrotate(faceImg, angle, 'bicubic', 'crop');
+            else
+                % 如果未检测到双眼，则跳过旋转
+                alignedFaceImg = faceImg;
+            end
+            
+            % 3. 裁剪并缩放为 ResNet-50 的标准输入尺寸 224x224
+            alignedFace = imresize(alignedFaceImg, [224, 224]);
+            
+            % 根据需求：将裁剪后的人脸转换为灰白图像
+            alignedFace = ImagePreprocess.toGray(alignedFace);
+            
+            success = true;
+        end
+        
+        function buildFaceDatabase(sourceDir, targetDir)
+            % 建立独立的物理基准数据库 (核心需求 1)
+            % 遍历 sourceDir，检测人脸并对齐后保存到 targetDir
+            if ~exist(targetDir, 'dir')
+                mkdir(targetDir);
+            end
+            
+            files = [dir(fullfile(sourceDir, '**', '*.jpg')); dir(fullfile(sourceDir, '**', '*.png'))];
+            if isempty(files)
+                disp('未找到图片文件');
+                return;
+            end
+            
+            disp(['开始构建人脸数据库，共 ', num2str(length(files)), ' 张图片...']);
+            for i = 1:length(files)
+                imgPath = fullfile(files(i).folder, files(i).name);
+                img = imread(imgPath);
+                
+                [alignedFace, success] = ImagePreprocess.detectAndAlignFace(img);
+                if success
+                    % 提取标签 (从文件名提取人名，自动去除末尾的数字和符号)
+                    [baseName, ~] = fileparts(files(i).name);
+                    personName = regexprep(baseName, '[\d\s_\-]+$', '');
+                    if isempty(personName)
+                        personName = 'Unknown';
+                    end
+                    
+                    labelDir = fullfile(targetDir, personName);
+                    if ~exist(labelDir, 'dir')
+                        mkdir(labelDir);
+                    end
+                    
+                    savePath = fullfile(labelDir, files(i).name);
+                    imwrite(alignedFace, savePath);
+                else
+                    disp(['未能在图片中检测到人脸: ', imgPath]);
+                end
+            end
+            disp('人脸数据库构建完成！');
+        end
     end
 end

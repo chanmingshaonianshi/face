@@ -1,8 +1,42 @@
 classdef ClassifierCore
     % ClassifierCore 自主实现的分类器核心类
-    % 包含最近邻分类器(欧式距离匹配)及准确率计算功能
+    % 包含最近邻分类器(余弦距离匹配)及准确率计算功能
     
     methods(Static)
+        %% 新增：深度学习特征提取模块 (核心需求 3)
+        function net = getDeepModel()
+            % 单例模式加载 ResNet-50，避免重复加载
+            persistent resnetModel;
+            if isempty(resnetModel)
+                disp('正在加载 ResNet-50 预训练模型，请稍候...');
+                resnetModel = resnet50;
+            end
+            net = resnetModel;
+        end
+        
+        function featureVector = extractDeepFeature(img)
+            % 提取深度特征
+            % img: 必须是 224x224x3 的图像 (如果已对齐，则满足此要求)
+            net = ClassifierCore.getDeepModel();
+            
+            if size(img, 3) == 1
+                img = repmat(img, [1, 1, 3]); % 灰度转RGB
+            end
+            
+            % 转换为单精度或保留uint8，activations 支持
+            layerName = 'avg_pool'; 
+            feat = activations(net, img, layerName, 'OutputAs', 'rows');
+            
+            % L2 归一化
+            normFeat = norm(feat);
+            if normFeat > 0
+                feat = feat / normFeat;
+            end
+            
+            % 返回列向量 (2048 x 1)，以兼容原有的分类器逻辑
+            featureVector = double(feat');
+        end
+        
         function [bestMatchIndex, minDistance] = classify(testFeature, trainFeatures)
             % classify: 自主编写最近邻分类器(优化：余弦距离匹配分类器)
             % 相比欧式距离，余弦距离对光照变化和特征缩放更鲁棒
@@ -60,6 +94,79 @@ classdef ClassifierCore
                 [bestMatchIndex, ~] = ClassifierCore.classify(testFeatures(:, i), trainFeatures);
                 predictedIndices(i) = bestMatchIndex;
             end
+        end
+        
+        function [bestLabel, bestIndex, minGroupDistance] = classifyByGroup(testFeature, trainFeatures, trainLabels)
+            % 基于类别聚合的最近邻分类：与每个类别的所有样本比较，取该类别的最小距离作为该类别分数
+            % 输入:
+            %   testFeature: K x 1 待测特征
+            %   trainFeatures: K x N 训练特征
+            %   trainLabels: 1 x N 训练标签（cell 或 string）
+            % 输出:
+            %   bestLabel: 最匹配的人员标签
+            %   bestIndex: 该人员中与测试样本距离最近的训练样本索引
+            %   minGroupDistance: 对应的最小组内距离（余弦距离）
+            
+            if iscell(trainLabels)
+                lbls = strings(1, numel(trainLabels));
+                for i = 1:numel(trainLabels)
+                    lbls(i) = string(trainLabels{i});
+                end
+            else
+                lbls = string(trainLabels);
+            end
+            
+            [~, N] = size(trainFeatures);
+            normTest = sqrt(sum(testFeature.^2));
+            if normTest == 0
+                normTest = 1;
+            end
+            
+            uniqueLabels = lbls(1);
+            groupMinDist = [inf];
+            groupBestIdx = [-1];
+            
+            for i = 1:N
+                trainFeat = trainFeatures(:, i);
+                normTrain = sqrt(sum(trainFeat.^2));
+                if normTrain == 0
+                    normTrain = 1;
+                end
+                cosSim = sum(testFeature .* trainFeat) / (normTest * normTrain);
+                dist = 1 - cosSim;
+                
+                % 查找当前标签在 uniqueLabels 中的位置
+                label = lbls(i);
+                pos = -1;
+                for j = 1:length(uniqueLabels)
+                    if label == uniqueLabels(j)
+                        pos = j;
+                        break;
+                    end
+                end
+                if pos == -1
+                    uniqueLabels(end+1) = label; %#ok<AGROW>
+                    groupMinDist(end+1) = dist; %#ok<AGROW>
+                    groupBestIdx(end+1) = i; %#ok<AGROW>
+                else
+                    if dist < groupMinDist(pos)
+                        groupMinDist(pos) = dist;
+                        groupBestIdx(pos) = i;
+                    end
+                end
+            end
+            
+            % 选取组距离最小的类别
+            minGroupDistance = inf;
+            minPos = 1;
+            for j = 1:length(groupMinDist)
+                if groupMinDist(j) < minGroupDistance
+                    minGroupDistance = groupMinDist(j);
+                    minPos = j;
+                end
+            end
+            bestLabel = uniqueLabels(minPos);
+            bestIndex = groupBestIdx(minPos);
         end
         
         function [overallAcc, classAccList] = calcAccuracy(testLabels, predictedLabels)
