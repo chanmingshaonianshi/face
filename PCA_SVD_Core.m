@@ -39,11 +39,15 @@ classdef PCA_SVD_Core
             % 提取对角线上的特征值并排序 (降序)
             eigenValues = diag(D);
             [sortedEigenValues, sortIdx] = sort(eigenValues, 'descend');
+            sortedEigenValues(sortedEigenValues < 0) = 0; % 数值误差保护
             
             % 优化：通过能量占比动态决定保留的主成分个数，而不是写死
             totalEnergy = sum(sortedEigenValues);
+            if totalEnergy <= 0
+                totalEnergy = 1;
+            end
             cumulativeEnergy = 0;
-            energyThreshold = 0.95; % 设定保留 95% 的能量
+            energyThreshold = 0.90; % 保留 90% 的能量，抑制噪声维度
             dynamicComponents = 0;
             
             for i = 1:length(sortedEigenValues)
@@ -54,12 +58,13 @@ classdef PCA_SVD_Core
                 end
             end
             
-            % 选取传入的主成分数和动态计算的主成分数中较大的一个，确保特征充足
+            % 在动态能量阈值与给定上限之间取更保守的维度，提升泛化
             if nargin < 2
                 numComponents = dynamicComponents; 
             else
-                numComponents = max(numComponents, dynamicComponents);
+                numComponents = min(numComponents, dynamicComponents);
             end
+            numComponents = max(5, numComponents);
             numComponents = min(numComponents, length(sortedEigenValues));
             
             % 取出排好序的特征向量

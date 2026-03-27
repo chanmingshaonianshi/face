@@ -45,6 +45,91 @@ classdef ClassifierCore
                 end
             end
         end
+
+        function [bestLabel, bestMatchIndex, bestSimilarity] = classifyKNNByLabel(testFeature, trainFeatures, trainLabels, k)
+            % classifyKNNByLabel: 按标签聚合的加权 KNN
+            % 逻辑：
+            % 1) 计算测试样本与全部训练样本的余弦相似度
+            % 2) 取 top-k 邻居，以相似度作为权重按“标签”投票
+            % 3) 输出获胜标签，并给出该标签下最相似训练样本索引
+            if nargin < 4 || isempty(k)
+                k = 5;
+            end
+
+            [~, N] = size(trainFeatures);
+            if N == 0
+                bestLabel = "Unknown";
+                bestMatchIndex = -1;
+                bestSimilarity = 0;
+                return;
+            end
+
+            if iscell(trainLabels)
+                lbls = strings(1, numel(trainLabels));
+                for i = 1:numel(trainLabels)
+                    lbls(i) = string(trainLabels{i});
+                end
+            else
+                lbls = string(trainLabels);
+            end
+
+            normTest = sqrt(sum(testFeature.^2));
+            if normTest == 0
+                normTest = 1;
+            end
+
+            sims = zeros(1, N);
+            for i = 1:N
+                trainFeat = trainFeatures(:, i);
+                normTrain = sqrt(sum(trainFeat.^2));
+                if normTrain == 0
+                    normTrain = 1;
+                end
+                sims(i) = sum(testFeature .* trainFeat) / (normTest * normTrain);
+            end
+
+            [sortedSims, sortedIdx] = sort(sims, 'descend');
+            k = min(max(1, k), N);
+            topIdx = sortedIdx(1:k);
+            topSims = sortedSims(1:k);
+
+            voteLabels = strings(1, 0);
+            voteScores = zeros(1, 0);
+            for i = 1:k
+                label = lbls(topIdx(i));
+                w = max(0, topSims(i)); % 负相似度不参与加权
+                if w == 0
+                    w = 1e-6;
+                end
+
+                pos = -1;
+                for j = 1:length(voteLabels)
+                    if voteLabels(j) == label
+                        pos = j;
+                        break;
+                    end
+                end
+
+                if pos == -1
+                    voteLabels(end+1) = label; %#ok<AGROW>
+                    voteScores(end+1) = w; %#ok<AGROW>
+                else
+                    voteScores(pos) = voteScores(pos) + w;
+                end
+            end
+
+            [~, winPos] = max(voteScores);
+            bestLabel = voteLabels(winPos);
+
+            bestSimilarity = -inf;
+            bestMatchIndex = topIdx(1);
+            for i = 1:N
+                if lbls(i) == bestLabel && sims(i) > bestSimilarity
+                    bestSimilarity = sims(i);
+                    bestMatchIndex = i;
+                end
+            end
+        end
         
         function predictedIndices = classifyBatch(testFeatures, trainFeatures)
             % 批量测试样本识别

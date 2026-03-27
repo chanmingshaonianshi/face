@@ -191,13 +191,27 @@ classdef ImagePreprocess
             success = false;
             alignedFace = [];
             
-            % 1. 检测人脸
-            persistent faceDetector;
-            if isempty(faceDetector)
-                faceDetector = vision.CascadeObjectDetector('MergeThreshold', 4);
+            % 1. 多检测器级联检测人脸（CART -> LBP -> Profile）
+            persistent faceDetectorCART faceDetectorLBP faceDetectorProfile;
+            if isempty(faceDetectorCART)
+                minFaceSize = [80, 80];
+                faceDetectorCART = vision.CascadeObjectDetector('FrontalFaceCART', ...
+                    'MergeThreshold', 4, 'MinSize', minFaceSize);
+                faceDetectorLBP = vision.CascadeObjectDetector('FrontalFaceLBP', ...
+                    'MergeThreshold', 4, 'MinSize', minFaceSize);
+                faceDetectorProfile = vision.CascadeObjectDetector('ProfileFace', ...
+                    'MergeThreshold', 4, 'MinSize', minFaceSize);
             end
-            
-            bbox = step(faceDetector, img);
+
+            grayDetect = ImagePreprocess.toGray(img);
+
+            bbox = step(faceDetectorCART, grayDetect);
+            if isempty(bbox)
+                bbox = step(faceDetectorLBP, grayDetect);
+            end
+            if isempty(bbox)
+                bbox = step(faceDetectorProfile, grayDetect);
+            end
             if isempty(bbox)
                 return;
             end

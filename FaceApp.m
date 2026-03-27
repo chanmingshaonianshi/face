@@ -40,6 +40,7 @@ classdef FaceApp < handle
         DBFeatures   % K x N 训练特征矩阵
         DBLabels     % 1 x N 标签
         DBPaths      % N x 1 图片路径
+        FeatureScale % K x 1 投影特征标准化尺度
 
         TestDataFeatures % K x M 测试特征矩阵
         TestLabels
@@ -48,6 +49,7 @@ classdef FaceApp < handle
         TargetRows = 112
         TargetCols = 92
         NumComponents = 0
+        KnnK = 5
 
         % 摄像头对象与实时防抖
         CamObj = []
@@ -201,7 +203,7 @@ classdef FaceApp < handle
             for i = 1:N
                 imgPath = trainFiles{i};
                 img = imread(imgPath);
-                [procImg, vec] = obj.preprocessForPCA(img);
+                [procImg, vec] = obj.preprocessForPCA(img, false);
 
                 Xtrain(:, i) = vec;
                 trainLabels{i} = obj.extractLabelFromPath(imgPath);
@@ -217,14 +219,23 @@ classdef FaceApp < handle
                 end
             end
 
-            numComponentsHint = min(max(10, round(N * 0.4)), max(1, N - 1));
+            % 维度上限采用较保守设置，减少高维噪声对泛化的影响
+            numComponentsHint = min(max(20, round(N * 0.25)), max(1, N - 1));
             obj.logMsg('开始执行 PCA+SVD 特征训练...');
             [obj.MeanFace, obj.EigenFaces, ~, ~] = PCA_SVD_Core.computePCA_SVD(Xtrain, numComponentsHint);
             obj.DBFeatures = PCA_SVD_Core.project(Xtrain, obj.MeanFace, obj.EigenFaces);
+            obj.FeatureScale = std(obj.DBFeatures, 0, 2);
+            obj.FeatureScale(obj.FeatureScale < 1e-6) = 1;
+            obj.DBFeatures = obj.DBFeatures ./ obj.FeatureScale;
+            obj.DBFeatures = obj.l2NormalizeColumns(obj.DBFeatures);
             obj.DBLabels = trainLabels;
             obj.DBPaths = trainPaths;
             obj.NumComponents = size(obj.EigenFaces, 2);
-            obj.logMsg(sprintf('模型训练完成。主成分个数: %d', obj.NumComponents));
+            obj.logMsg(sprintf('模型训练完成。主成分个数: %d, KNN(k=%d)', obj.NumComponents, obj.KnnK));
+
+            % 基于训练集内同类最近邻相似度估计 Unknown 阈值
+            obj.SimThreshold = obj.estimateSimThresholdFromTrain();
+            obj.logMsg(sprintf('自动阈值估计完成。SimThreshold=%.3f', obj.SimThreshold));
 
             if ~isempty(obj.TestFolder)
                 testFiles = obj.listImageFiles(obj.TestFolder);
@@ -242,7 +253,7 @@ classdef FaceApp < handle
                 for i = 1:M
                     imgPath = testFiles{i};
                     img = imread(imgPath);
-                    [~, vec] = obj.preprocessForPCA(img);
+                    [~, vec] = obj.preprocessForPCA(img, false);
 
                     Xtest(:, i) = vec;
                     obj.TestLabels{i} = obj.extractLabelFromPath(imgPath);
@@ -250,6 +261,8 @@ classdef FaceApp < handle
                 end
 
                 obj.TestDataFeatures = PCA_SVD_Core.project(Xtest, obj.MeanFace, obj.EigenFaces);
+                obj.TestDataFeatures = obj.TestDataFeatures ./ obj.FeatureScale;
+                obj.TestDataFeatures = obj.l2NormalizeColumns(obj.TestDataFeatures);
                 obj.logMsg('测试特征构建完成。');
                 obj.BtnTestBatch.Enable = 'on';
             else
@@ -280,8 +293,9 @@ classdef FaceApp < handle
 
             predictedLabels = cell(1, M);
             for i = 1:M
-                [bestMatchIndex, ~] = ClassifierCore.classify(obj.TestDataFeatures(:, i), obj.DBFeatures);
-                predictedLabels{i} = obj.DBLabels{bestMatchIndex};
+                [bestLabel, ~, ~] = ClassifierCore.classifyKNNByLabel( ...
+                    obj.TestDataFeatures(:, i), obj.DBFeatures, obj.DBLabels, obj.KnnK);
+                predictedLabels{i} = char(bestLabel);
             end
 
             testStrLabels = string(obj.TestLabels);
@@ -320,16 +334,19 @@ classdef FaceApp < handle
             obj.logMsg('正在进行单样本识别...');
             tic;
 
-            [procImg, vec] = obj.preprocessForPCA(obj.CurrentTestImage);
+            [procImg, vec] = obj.preprocessForPCA(obj.CurrentTestImage, true);
             imshow(procImg, 'Parent', obj.AxesPreprocess);
 
             testFeature = PCA_SVD_Core.project(vec, obj.MeanFace, obj.EigenFaces);
-            [bestMatchIndex, minDistance] = ClassifierCore.classify(testFeature, obj.DBFeatures);
+            testFeature = testFeature ./ obj.FeatureScale;
+            testFeature = obj.l2NormalizeColumns(testFeature);
+            [bestLabel, bestMatchIndex, simScore] = ClassifierCore.classifyKNNByLabel( ...
+                testFeature, obj.DBFeatures, obj.DBLabels, obj.KnnK);
 
             elapsedTime = toc;
-            matchLabel = obj.DBLabels{bestMatchIndex};
+            matchLabel = char(bestLabel);
             matchPath = obj.DBPaths{bestMatchIndex};
-            simScore = max(0, 1 - minDistance);
+            simScore = max(0, simScore);
 
             obj.logMsg(sprintf('识别完成！耗时: %.2f 秒', elapsedTime));
             if simScore < obj.SimThreshold
@@ -427,14 +444,17 @@ classdef FaceApp < handle
         end
 
         function processRealTimeFrame(obj, img)
-            [procImg, vec] = obj.preprocessForPCA(img);
+            [procImg, vec] = obj.preprocessForPCA(img, true);
             imshow(procImg, 'Parent', obj.AxesPreprocess);
 
             testFeature = PCA_SVD_Core.project(vec, obj.MeanFace, obj.EigenFaces);
-            [bestMatchIndex, minDistance] = ClassifierCore.classify(testFeature, obj.DBFeatures);
+            testFeature = testFeature ./ obj.FeatureScale;
+            testFeature = obj.l2NormalizeColumns(testFeature);
+            [bestLabel, ~, simScore] = ClassifierCore.classifyKNNByLabel( ...
+                testFeature, obj.DBFeatures, obj.DBLabels, obj.KnnK);
 
-            bestLabel = obj.DBLabels{bestMatchIndex};
-            simScore = max(0, 1 - minDistance);
+            bestLabel = char(bestLabel);
+            simScore = max(0, simScore);
 
             if simScore < obj.SimThreshold
                 currentResult = 'Unknown';
@@ -499,27 +519,106 @@ classdef FaceApp < handle
             end
         end
 
-        function [procImg, vec] = preprocessForPCA(obj, img)
-            % 优先做人脸检测与对齐；失败时退化为通用灰度预处理
-            aligned = [];
-            success = false;
-            try
-                [aligned, success] = ImagePreprocess.detectAndAlignFace(img);
-            catch
-                success = false;
+        function [procImg, vec] = preprocessForPCA(obj, img, useFaceDetect)
+            % 训练/测试集使用稳定统一预处理；待识别图像优先做人脸检测与对齐
+            if nargin < 3
+                useFaceDetect = true;
             end
 
-            if success
-                grayImg = aligned;
+            if ~useFaceDetect
+                procImg = ImagePreprocess.fullProcess(img, obj.TargetRows, obj.TargetCols);
             else
-                grayImg = ImagePreprocess.toGray(img);
+                aligned = [];
+                success = false;
+                try
+                    [aligned, success] = ImagePreprocess.detectAndAlignFace(img);
+                catch
+                    success = false;
+                end
+
+                if success
+                    grayImg = aligned;
+                else
+                    grayImg = ImagePreprocess.toGray(img);
+                    grayImg = ImagePreprocess.cropCenter(grayImg, 0.70);
+                end
+
                 grayImg = ImagePreprocess.denoise(grayImg);
                 grayImg = ImagePreprocess.histEq(grayImg);
+                resized = ImagePreprocess.resizeImg(grayImg, obj.TargetRows, obj.TargetCols);
+                procImg = ImagePreprocess.normalizePixels(resized);
             end
 
-            resized = ImagePreprocess.resizeImg(grayImg, obj.TargetRows, obj.TargetCols);
-            procImg = ImagePreprocess.normalizePixels(resized);
             vec = ImagePreprocess.vectorizeImg(procImg);
+            vec = obj.normalizeVector(vec);
+        end
+
+        function outVec = normalizeVector(~, vec)
+            % 向量标准化：去均值 + 标准差归一 + L2 归一，提升光照鲁棒性
+            outVec = double(vec);
+            m = mean(outVec);
+            outVec = outVec - m;
+
+            s = std(outVec);
+            if s > 1e-8
+                outVec = outVec / s;
+            end
+
+            n = norm(outVec);
+            if n > 0
+                outVec = outVec / n;
+            end
+        end
+
+        function F = l2NormalizeColumns(~, F)
+            % 对特征矩阵每一列做 L2 归一，稳定余弦相似度
+            [~, M] = size(F);
+            for i = 1:M
+                n = norm(F(:, i));
+                if n > 0
+                    F(:, i) = F(:, i) / n;
+                end
+            end
+        end
+
+        function threshold = estimateSimThresholdFromTrain(obj)
+            % 根据训练集“同类最近邻相似度”自适应估计 Unknown 阈值
+            N = size(obj.DBFeatures, 2);
+            if N < 2
+                threshold = 0.55;
+                return;
+            end
+
+            sims = [];
+            for i = 1:N
+                thisLabel = string(obj.DBLabels{i});
+                bestSim = -inf;
+                for j = 1:N
+                    if j == i
+                        continue;
+                    end
+                    if string(obj.DBLabels{j}) ~= thisLabel
+                        continue;
+                    end
+                    sim = obj.DBFeatures(:, i)' * obj.DBFeatures(:, j);
+                    if sim > bestSim
+                        bestSim = sim;
+                    end
+                end
+                if bestSim > -inf
+                    sims(end+1) = bestSim; %#ok<AGROW>
+                end
+            end
+
+            if isempty(sims)
+                threshold = 0.55;
+                return;
+            end
+
+            mu = mean(sims);
+            sigma = std(sims);
+            threshold = mu - 2.2 * sigma;
+            threshold = min(max(threshold, 0.40), 0.85);
         end
     end
 end
