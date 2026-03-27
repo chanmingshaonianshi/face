@@ -3,40 +3,6 @@ classdef ClassifierCore
     % 包含最近邻分类器(余弦距离匹配)及准确率计算功能
     
     methods(Static)
-        %% 新增：深度学习特征提取模块 (核心需求 3)
-        function net = getDeepModel()
-            % 单例模式加载 ResNet-50，避免重复加载
-            persistent resnetModel;
-            if isempty(resnetModel)
-                disp('正在加载 ResNet-50 预训练模型，请稍候...');
-                resnetModel = resnet50;
-            end
-            net = resnetModel;
-        end
-        
-        function featureVector = extractDeepFeature(img)
-            % 提取深度特征
-            % img: 必须是 224x224x3 的图像 (如果已对齐，则满足此要求)
-            net = ClassifierCore.getDeepModel();
-            
-            if size(img, 3) == 1
-                img = repmat(img, [1, 1, 3]); % 灰度转RGB
-            end
-            
-            % 转换为单精度或保留uint8，activations 支持
-            layerName = 'avg_pool'; 
-            feat = activations(net, img, layerName, 'OutputAs', 'rows');
-            
-            % L2 归一化
-            normFeat = norm(feat);
-            if normFeat > 0
-                feat = feat / normFeat;
-            end
-            
-            % 返回列向量 (2048 x 1)，以兼容原有的分类器逻辑
-            featureVector = double(feat');
-        end
-        
         function [bestMatchIndex, minDistance] = classify(testFeature, trainFeatures)
             % classify: 自主编写最近邻分类器(优化：余弦距离匹配分类器)
             % 相比欧式距离，余弦距离对光照变化和特征缩放更鲁棒

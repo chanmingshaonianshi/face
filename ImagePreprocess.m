@@ -185,9 +185,9 @@ classdef ImagePreprocess
             processImg = ImagePreprocess.normalizePixels(img);
         end
         
-        %% 新增：核心需求 1 & 2 - 人脸检测与对齐 (Face Alignment)
+        %% 核心：人脸检测与对齐 (Face Alignment)
         function [alignedFace, success] = detectAndAlignFace(img)
-            % detectAndAlignFace: 检测人脸，进行关键点对齐(基于双眼)，并裁剪缩放为 224x224 (适配 ResNet-50)
+            % detectAndAlignFace: 检测人脸，进行关键点对齐(基于双眼)，并裁剪缩放为统一尺寸
             success = false;
             alignedFace = [];
             
@@ -239,7 +239,7 @@ classdef ImagePreprocess
                 alignedFaceImg = faceImg;
             end
             
-            % 3. 裁剪并缩放为 ResNet-50 的标准输入尺寸 224x224
+            % 3. 裁剪并缩放为统一尺寸 224x224（后续流程可再缩放）
             alignedFace = imresize(alignedFaceImg, [224, 224]);
             
             % 根据需求：将裁剪后的人脸转换为灰白图像
@@ -268,9 +268,15 @@ classdef ImagePreprocess
                 
                 [alignedFace, success] = ImagePreprocess.detectAndAlignFace(img);
                 if success
-                    % 提取标签 (从文件名提取人名，自动去除末尾的数字和符号)
+                    % 提取标签：优先使用“下划线前”的人名，如 张三_XXXXX.jpg -> 张三
                     [baseName, ~] = fileparts(files(i).name);
-                    personName = regexprep(baseName, '[\d\s_\-]+$', '');
+                    token = regexp(baseName, '^(.+?)_', 'tokens', 'once');
+                    if ~isempty(token)
+                        personName = token{1};
+                    else
+                        % 兼容无下划线命名：去除末尾数字和连接符
+                        personName = regexprep(baseName, '[\d\s_\-]+$', '');
+                    end
                     if isempty(personName)
                         personName = 'Unknown';
                     end
