@@ -59,13 +59,12 @@ classdef PCA_SVD_Core
             end
             
             % 在动态能量阈值与给定上限之间取更保守的维度，提升泛化
-            if nargin < 2
-                numComponents = dynamicComponents; 
+            if nargin < 2 || numComponents <= 0
+                numComponents = dynamicComponents;
             else
-                numComponents = min(numComponents, dynamicComponents);
+                numComponents = min(numComponents, length(sortedEigenValues));
             end
             numComponents = max(5, numComponents);
-            numComponents = min(numComponents, length(sortedEigenValues));
             
             % 取出排好序的特征向量
             V_sorted = V(:, sortIdx);
