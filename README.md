@@ -26,12 +26,13 @@
 - 摄像头功能：需安装 `MATLAB Support Package for USB Webcams`
 
 ## 3. 文件说明
-- `FaceAp.m`：GUI 与主控流程（训练、测试、离线识别、摄像头实时识别）
+- `FaceApp.m`：GUI 主程序（左控制面板 + 右显示区布局，深度 embedding 集成）
 - `ImagePreprocess.m`：图像预处理与人脸检测/对齐
 - `PCA_SVD_Core.m`：PCA + SVD 核心算法（含 Jacobi 特征分解）
 - `ClassifierCore.m`：分类器（余弦距离、加权KNN）与准确率计算
 - `untitled.m`：一键启动入口
-- `extract_embeddings.py`：Python 脚本，用 insightface ArcFace 提取人脸 512 维 embedding，输出 `.mat` 文件
+- `extract_embeddings.py`：批量提取训练集/测试集 embedding，输出 `.mat` 文件
+- `single_embedding.py`：单图 embedding 提取（供 GUI 实时调用）
 - `poc_deep_pca.m`：PoC 验证脚本，测试深度 embedding + PCA 的识别准确率
 - `train_data_embeddings.mat`：训练集深度 embedding（512×N）
 - `test_data_embeddings.mat`：测试集深度 embedding（512×M）
@@ -76,31 +77,25 @@ poc_deep_pca
 
 输出：整体准确率、各类别准确率、最差类别明细
 
-### 5.4 启动
+### 5.3 启动 GUI
 在 MATLAB 中切到项目根目录，运行：
 
 ```matlab
 untitled
 ```
 
-### 5.5 训练与测试
-1. 点击 `2. 加载 train/test 并训练 PCA+SVD`
-2. 选择包含 `train_data` 和 `test_data` 的项目目录
-3. 系统自动：
-   - 读取 `train_data` 训练模型
-   - 读取 `test_data` 构建测试特征
-4. 点击 `3. 批量测试 test_data` 计算准确率
+### 5.4 加载模型并识别
+1. 点击 `1. 加载模型`，选择项目根目录（含 `train_data_embeddings.mat`）
+2. 点击 `2. 选择图片`，选择待识别的人脸图片
+3. 点击 `3. 开始识别`，显示匹配结果和相似度
 
-### 5.6 单张图片识别
-1. 点击 `选择待测人脸图片`
-2. 点击 `执行单样本识别 (PCA+SVD)`
-3. 系统输出匹配标签和相似度
-4. 识别时会根据训练集统计自动估计 `Unknown` 阈值（可在代码中手动调参）
+### 5.5 批量测试
+加载模型后，点击 `4. 批量测试` 计算 test_data 整体准确率
 
-### 5.7 摄像头实时识别
-1. 点击 `启动/关闭摄像头`
-2. 模型已训练后可点击 `开启实时识别防抖`
-3. 系统在连续多帧一致时输出稳定结果
+### 5.6 摄像头实时识别
+1. 点击 `5. 开启摄像头` 启动预览
+2. 点击 `开启实时识别` 启用人脸识别防抖
+3. 连续多帧一致时输出稳定结果
 
 ## 6. PCA 调参
 
@@ -115,7 +110,7 @@ untitled
 修改方式：只需改 `poc_deep_pca.m` 第 23 行的 `numComponents` 值，`PCA_SVD_Core.m` 会直接信任该参数。
 
 ## 7. 说明
-- `Face_Database` 构建按钮是可选功能，主要用于把训练图像先做对齐归档。
-- 主识别流程直接使用 `train_data/test_data`，不依赖 `Face_Database` 才能运行。
 - 深度 embedding 提取依赖 insightface buffalo_l 模型（275MB），首次使用前需手动下载。
 - .mat embedding 文件已纳入版本管理，无需每次重新提取。
+- GUI 单图识别和摄像头实时识别需调用 Python 脚本（`single_embedding.py`），每次调用约 1-2 秒。
+- Python 路径硬编码为 `C:\Python311\python.exe`，如需修改请编辑 `FaceApp.m` 第 29 行。
