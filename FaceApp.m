@@ -61,6 +61,13 @@ classdef FaceApp < handle
         HistoryLabels = {}
         SmoothFrames = 5
 
+        % 实时识别独立窗口
+        RealTimeFig = []
+        RealTimeAxes = []
+        RealTimeLabel = []
+        RealTimeInfo = []
+        LastServerRestart = 0
+
         CurrentTestImage = []
         MaxLogLines = 30
     end
@@ -424,11 +431,12 @@ classdef FaceApp < handle
         end
 
         function stopCamera(obj)
-            % 关闭实时识别 + 持久进程
+            % 关闭实时识别 + 持久进程 + 独立窗口
             obj.IsRealTimeEnabled = false;
             obj.BtnToggleRealTime.Enable = 'off';
             obj.BtnToggleRealTime.Text = '开启实时识别';
             obj.stopServer();
+            obj.closeRealTimeWindow();
 
             % 关闭摄像头
             if ~isempty(obj.CamTimer), stop(obj.CamTimer); delete(obj.CamTimer); obj.CamTimer = []; end
@@ -448,6 +456,7 @@ classdef FaceApp < handle
                 obj.IsRealTimeEnabled = false;
                 obj.BtnToggleRealTime.Text = '开启实时识别';
                 obj.stopServer();
+                obj.closeRealTimeWindow();
                 obj.logMsg('实时识别已关闭');
             else
                 % 启动持久 Python 进程
@@ -460,6 +469,7 @@ classdef FaceApp < handle
                 obj.IsRealTimeEnabled = true;
                 obj.BtnToggleRealTime.Text = '关闭实时识别';
                 obj.HistoryLabels = {};
+                obj.openRealTimeWindow();
                 obj.logMsg('实时识别已开启，摄像头已就绪');
             end
         end
@@ -468,16 +478,24 @@ classdef FaceApp < handle
             if ~obj.IsCamRunning || isempty(obj.CamObj), return; end
             try
                 img = snapshot(obj.CamObj);
-                imshow(img, 'Parent', obj.AxesCamera);
 
-                if obj.IsRealTimeEnabled && ~isempty(obj.DBFeatures)
+                if obj.IsRealTimeEnabled
+                    % 实时识别模式：画面显示在独立窗口
+                    if ~isempty(obj.RealTimeFig) && isvalid(obj.RealTimeFig)
+                        imshow(img, 'Parent', obj.RealTimeAxes);
+                    end
                     obj.processFrame(img);
+                else
+                    % 非实时模式：画面显示在原 GUI 预览区
+                    imshow(img, 'Parent', obj.AxesCamera);
                 end
             catch
             end
         end
 
         function processFrame(obj, img)
+            if isempty(obj.DBFeatures), return; end
+
             % 保存帧到临时文件
             tmpImg = fullfile(obj.ProjectDir, '_tmp_cam.jpg');
             imwrite(img, tmpImg);
@@ -486,16 +504,41 @@ classdef FaceApp < handle
             reply = obj.serverQuery(tmpImg);
             if isfile(tmpImg), delete(tmpImg); end
 
-            if isempty(reply) || startsWith(reply, 'error')
+            % 如果 server 无响应，尝试自动重启
+            if isempty(reply)
+                now_t = posixtime(datetime('now'));
+                if (now_t - obj.LastServerRestart) > 10
+                    obj.logMsg('Server 无响应，正在重启...');
+                    obj.LastServerRestart = now_t;
+                    obj.stopServer();
+                    if obj.startServer()
+                        obj.logMsg('Server 重启成功');
+                    else
+                        obj.logMsg('Server 重启失败');
+                    end
+                end
+                return;
+            end
+
+            if startsWith(reply, 'error')
+                obj.logMsg(sprintf('Server 错误: %s', reply));
                 return;
             end
 
             % 解析 "ok,0.0012,0.0034,..."
             parts = split(reply, ',');
-            if length(parts) ~= 513, return; end  % "ok" + 512 floats
+            if length(parts) ~= 513
+                obj.logMsg(sprintf('Embedding 解析失败: 部分数=%d, 期望513', length(parts)));
+                return;
+            end
+
             vals = zeros(512, 1);
             for k = 1:512
                 vals(k) = str2double(parts{k + 1});
+            end
+            if ~all(isfinite(vals))
+                obj.logMsg('Embedding 包含 NaN/Inf');
+                return;
             end
 
             vec = vals(:);
@@ -514,18 +557,23 @@ classdef FaceApp < handle
                 curResult = bestLabel;
             end
 
+            % 平滑结果
             obj.HistoryLabels{end+1} = curResult;
             if length(obj.HistoryLabels) > obj.SmoothFrames
                 obj.HistoryLabels(1) = [];
             end
 
+            % 更新原 GUI 状态标签
             if length(obj.HistoryLabels) >= obj.SmoothFrames
                 [uniqueL, ~, ic] = unique(obj.HistoryLabels);
                 counts = accumarray(ic, 1);
                 [maxCount, idx] = max(counts);
                 if maxCount >= ceil(obj.SmoothFrames * 0.8)
-                    obj.LabelCamStatus.Text = sprintf('识别: %s (%.2f)', uniqueL{idx}, simScore);
+                    stableResult = uniqueL{idx};
+                    obj.LabelCamStatus.Text = sprintf('识别: %s (%.2f)', stableResult, simScore);
                     obj.LabelCamStatus.FontColor = [0.8 0.1 0.1];
+                    % 更新独立窗口结果
+                    obj.updateRealTimeResult(stableResult, simScore);
                 else
                     obj.LabelCamStatus.Text = '识别中...';
                     obj.LabelCamStatus.FontColor = [0.1 0.1 0.8];
@@ -534,44 +582,127 @@ classdef FaceApp < handle
                 obj.LabelCamStatus.Text = '采集中...';
                 obj.LabelCamStatus.FontColor = [0.1 0.1 0.8];
             end
+
+            % 更新独立窗口的实时信息
+            if ~isempty(obj.RealTimeFig) && isvalid(obj.RealTimeFig)
+                obj.RealTimeInfo.Text = sprintf('相似度: %.4f | 阈值: %.4f | 当前帧: %s', ...
+                    simScore, obj.SimThreshold, curResult);
+            end
         end
     end
 
     methods (Access = private)
-        % ────── 持久 Python 进程管理 ──────
+        % ────── 实时识别独立窗口 ──────
+        function openRealTimeWindow(obj)
+            obj.closeRealTimeWindow();
+
+            obj.RealTimeFig = uifigure('Name', '实时人脸识别', ...
+                'Position', [200, 100, 800, 650], 'Color', [0.15 0.15 0.15], ...
+                'CloseRequestFcn', @(~,~) obj.onRealTimeWindowClosed());
+
+            obj.RealTimeAxes = uiaxes(obj.RealTimeFig, ...
+                'Position', [10, 70, 780, 540], 'BackgroundColor', [0.1 0.1 0.1]);
+            title(obj.RealTimeAxes, '摄像头画面', 'FontSize', 14, 'Color', 'white');
+            axis(obj.RealTimeAxes, 'off');
+
+            obj.RealTimeLabel = uilabel(obj.RealTimeFig, ...
+                'Text', '等待识别...', ...
+                'Position', [10, 35, 780, 30], ...
+                'FontSize', 18, 'FontWeight', 'bold', ...
+                'FontColor', [0.2 1.0 0.4], ...
+                'HorizontalAlignment', 'center');
+
+            obj.RealTimeInfo = uilabel(obj.RealTimeFig, ...
+                'Text', '就绪', ...
+                'Position', [10, 8, 780, 22], ...
+                'FontSize', 11, 'FontColor', [0.7 0.7 0.7], ...
+                'HorizontalAlignment', 'center');
+        end
+
+        function closeRealTimeWindow(obj)
+            if ~isempty(obj.RealTimeFig)
+                try
+                    if isvalid(obj.RealTimeFig)
+                        delete(obj.RealTimeFig);
+                    end
+                catch
+                end
+                obj.RealTimeFig = [];
+                obj.RealTimeAxes = [];
+                obj.RealTimeLabel = [];
+                obj.RealTimeInfo = [];
+            end
+        end
+
+        function onRealTimeWindowClosed(obj)
+            % 用户手动关闭独立窗口 → 关闭实时识别
+            if obj.IsRealTimeEnabled
+                obj.IsRealTimeEnabled = false;
+                obj.BtnToggleRealTime.Text = '开启实时识别';
+                obj.stopServer();
+                obj.RealTimeFig = [];
+                obj.RealTimeAxes = [];
+                obj.RealTimeLabel = [];
+                obj.RealTimeInfo = [];
+                obj.logMsg('实时识别窗口已关闭');
+            end
+        end
+
+        function updateRealTimeResult(obj, label, simScore)
+            if isempty(obj.RealTimeFig) || ~isvalid(obj.RealTimeFig), return; end
+            if strcmp(label, 'Unknown')
+                obj.RealTimeLabel.Text = sprintf('? Unknown  (%.2f)', simScore);
+                obj.RealTimeLabel.FontColor = [0.7 0.7 0.7];
+            else
+                obj.RealTimeLabel.Text = sprintf('%s  (%.2f)', label, simScore);
+                obj.RealTimeLabel.FontColor = [0.2 1.0 0.4];
+            end
+        end
+
+        % ────── 持久 Python 进程管理（文件交换协议） ──────
         function ok = startServer(obj)
-            % 启动 embedding_server.py 作为子进程
+            % 启动 embedding_server.py 子进程，通过文件交换中文路径
             ok = false;
             obj.stopServer();
 
-            cmd = sprintf('"%s" "%s"', obj.PythonExe, obj.ServerScript);
+            % 清理旧的交换文件
+            for f = {'_server_req.txt','_server_rep.txt','_server_quit.lock','_server_ready.lock'}
+                fp = fullfile(obj.ProjectDir, f{1});
+                if isfile(fp), delete(fp); end
+            end
+
             try
-                pb = java.lang.ProcessBuilder(java.util.Arrays.asList({'cmd', '/c', cmd}));
-                pb.redirectErrorStream(true);
+                cmdList = java.util.Arrays.asList({obj.PythonExe, obj.ServerScript});
+                pb = java.lang.ProcessBuilder(cmdList);
                 pb.directory(java.io.File(obj.ProjectDir));
                 obj.ServerProc = pb.start();
 
-                % 读取 "ready" 行
-                inStream = obj.ServerProc.getInputStream();
-                reader = java.io.BufferedReader(java.io.InputStreamReader(inStream));
-                readyLine = reader.readLine();
-
-                if ~isempty(readyLine) && contains(char(readyLine), 'ready')
-                    ok = true;
+                % 等待 _server_ready.lock 出现（最多 30 秒）
+                readyFile = fullfile(obj.ProjectDir, '_server_ready.lock');
+                t0 = now;
+                while ~isfile(readyFile)
+                    pause(0.1);
+                    if (now - t0) * 86400 > 30, break; end
                 end
-            catch e
+                if isfile(readyFile)
+                    ok = true;
+                    delete(readyFile);
+                end
+            catch
                 obj.ServerProc = [];
             end
         end
 
         function stopServer(obj)
+            % 发送退出信号
+            quitLock = fullfile(obj.ProjectDir, '_server_quit.lock');
+            try
+                fid = fopen(quitLock, 'w'); fclose(fid);
+            catch
+            end
+
             if ~isempty(obj.ServerProc)
                 try
-                    % 发送 quit
-                    outStream = obj.ServerProc.getOutputStream();
-                    writer = java.io.PrintWriter(outStream, true);
-                    writer.println('quit');
-                    writer.flush();
                     obj.ServerProc.waitFor();
                 catch
                 end
@@ -581,53 +712,46 @@ classdef FaceApp < handle
                 end
                 obj.ServerProc = [];
             end
+
+            % 清理交换文件
+            for f = {'_server_req.txt','_server_rep.txt','_server_quit.lock','_server_ready.lock'}
+                fp = fullfile(obj.ProjectDir, f{1});
+                if isfile(fp), delete(fp); end
+            end
         end
 
         function reply = serverQuery(obj, imgPath)
-            % 向持久进程发送图片路径，读取一行回复
+            % 通过文件交换方式向 Python 进程发送路径并获取 embedding
             reply = '';
             if isempty(obj.ServerProc), return; end
-            try
-                outStream = obj.ServerProc.getOutputStream();
-                writer = java.io.PrintWriter(outStream, true);
-                writer.println(imgPath);
-                writer.flush();
 
-                inStream = obj.ServerProc.getInputStream();
-                reader = java.io.BufferedReader(java.io.InputStreamReader(inStream));
-                line = reader.readLine();
-                if ~isempty(line)
-                    reply = char(line);
+            reqFile = fullfile(obj.ProjectDir, '_server_req.txt');
+            repFile = fullfile(obj.ProjectDir, '_server_rep.txt');
+
+            try
+                % 写入请求文件
+                fid = fopen(reqFile, 'w', 'n', 'UTF-8');
+                fwrite(fid, imgPath, 'char');
+                fclose(fid);
+
+                % 等待回复文件出现（最多 5 秒）
+                t0 = now;
+                while ~isfile(repFile)
+                    pause(0.01);
+                    if (now - t0) * 86400 > 5
+                        obj.logMsg('Server 回复超时');
+                        return;
+                    end
                 end
+
+                pause(0.02);
+                reply = strtrim(fileread(repFile));
+
+                if isfile(repFile), delete(repFile); end
             catch
                 reply = '';
             end
         end
-
-        % ────── 读取 embedding 文件 ──────
-        function vec = readEmbeddingFile(~, filePath)
-            vec = [];
-            if ~isfile(filePath), return; end
-            try
-                raw = fileread(filePath);
-                raw = strtrim(raw);
-                if isempty(raw) || startsWith(raw, 'ERROR')
-                    return;
-                end
-                parts = strsplit(raw, ',');
-                vals = zeros(1, length(parts));
-                for k = 1:length(parts)
-                    vals(k) = str2double(strtrim(parts{k}));
-                end
-                if length(vals) == 512 && all(isfinite(vals))
-                    vec = vals(:); % 512 x 1
-                end
-            catch
-                vec = [];
-            end
-        end
-
-        % ────── 工具函数 ──────
         function F = l2normalize(~, F)
             for i = 1:size(F, 2)
                 n = norm(F(:, i));
