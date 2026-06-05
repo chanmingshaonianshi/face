@@ -25,14 +25,17 @@ classdef FaceApp < handle
         AxesCamera
         LogTextArea
 
-        % Python 路径
+        % Python
         PythonExe = 'C:\Python311\python.exe'
-        EmbeddingScript
+        SingleEmbScript   % single_embedding.py
+        ServerScript      % embedding_server.py
+        ProjectDir        % 项目根目录
+
+        % 持久 Python 进程（摄像头用）
+        ServerProc = []   % java.lang.Process
 
         % 数据
         DatasetPath = ''
-        TrainMat
-        TestMat
 
         % PCA 模型
         MeanFace
@@ -59,15 +62,16 @@ classdef FaceApp < handle
         SmoothFrames = 5
 
         CurrentTestImage = []
-        LogCount = 0
         MaxLogLines = 30
     end
 
     methods
         function obj = FaceApp()
-            obj.EmbeddingScript = fullfile(fileparts(mfilename('fullpath')), 'single_embedding.py');
+            obj.ProjectDir = fileparts(mfilename('fullpath'));
+            obj.SingleEmbScript = fullfile(obj.ProjectDir, 'single_embedding.py');
+            obj.ServerScript = fullfile(obj.ProjectDir, 'embedding_server.py');
             obj.createUI();
-            obj.logMsg('系统就绪。请先点击「加载模型」。');
+            obj.logMsg('系统就绪。请点击「1. 加载模型」。');
         end
 
         function createUI(obj)
@@ -89,7 +93,6 @@ classdef FaceApp < handle
                 'FontSize', 11, 'FontColor', [0.5 0.5 0.5], ...
                 'HorizontalAlignment', 'center');
 
-            % 按钮组
             y = 580;
             obj.BtnLoadModel = uibutton(obj.PanelControl, 'push', ...
                 'Text', '1. 加载模型', 'Position', [20, y, 220, 38], ...
@@ -132,7 +135,6 @@ classdef FaceApp < handle
             uilabel(obj.PanelControl, 'Text', repmat('_', 1, 30), ...
                 'Position', [20, y, 220, 16], 'FontColor', [0.75 0.75 0.75]);
 
-            % 状态信息
             y = y - 30;
             obj.LabelAccuracy = uilabel(obj.PanelControl, ...
                 'Text', '准确率: --', ...
@@ -145,7 +147,7 @@ classdef FaceApp < handle
                 'Position', [20, y, 220, 22], ...
                 'FontSize', 11, 'FontColor', [0.5 0.5 0.5]);
 
-            % ── 右上：主显示区（原始图 + 匹配结果） ──
+            % ── 右上：主显示区 ──
             obj.PanelDisplay = uipanel(obj.UIFigure, ...
                 'Title', '识别结果', 'FontSize', 12, ...
                 'Position', [270, 300, 1000, 400]);
@@ -183,7 +185,7 @@ classdef FaceApp < handle
                 'FontSize', 11, 'FontWeight', 'bold', ...
                 'FontColor', [0.4 0.4 0.4]);
 
-            % ── 右下：日志区（窄条） ──
+            % ── 右下：日志区 ──
             obj.PanelLog = uipanel(obj.UIFigure, ...
                 'Title', '日志', 'FontSize', 11, ...
                 'Position', [270, 0, 1000, 35]);
@@ -228,35 +230,33 @@ classdef FaceApp < handle
             obj.logMsg('正在加载训练集 embedding...');
             drawnow;
 
-            obj.TrainMat = load(trainMatPath);
-            Xtrain = obj.TrainMat.embeddings'; % 512 x N
-            obj.DBLabels = obj.TrainMat.labels;
-            obj.DBFilenames = obj.TrainMat.filenames;
+            data = load(trainMatPath);
+            Xtrain = data.embeddings'; % 512 x N
+            obj.DBLabels = data.labels;
+            obj.DBFilenames = data.filenames;
 
             [d, N] = size(Xtrain);
             obj.logMsg(sprintf('训练集: %d 样本, 维度 %d', N, d));
 
-            % PCA + SVD 训练
             obj.logMsg(sprintf('PCA 训练中 (主成分数=%d)...', obj.NumComponents));
             drawnow;
             [obj.MeanFace, obj.EigenFaces, ~, ~] = PCA_SVD_Core.computePCA_SVD(Xtrain, obj.NumComponents);
             obj.NumComponents = size(obj.EigenFaces, 2);
             obj.logMsg(sprintf('PCA 完成: %d 个主成分', obj.NumComponents));
 
-            % 投影 + 标准化
             obj.DBFeatures = PCA_SVD_Core.project(Xtrain, obj.MeanFace, obj.EigenFaces);
             obj.FeatureScale = std(obj.DBFeatures, 0, 2);
             obj.FeatureScale(obj.FeatureScale < 1e-6) = 1;
             obj.DBFeatures = obj.DBFeatures ./ obj.FeatureScale;
             obj.DBFeatures = obj.l2normalize(obj.DBFeatures);
 
-            % 加载测试集
+            % 测试集
             testMatPath = fullfile(rootDir, 'test_data_embeddings.mat');
             if isfile(testMatPath)
-                obj.TestMat = load(testMatPath);
-                Xtest = obj.TestMat.embeddings';
-                obj.TestLabels = obj.TestMat.labels;
-                obj.TestFilenames = obj.TestMat.filenames;
+                tdata = load(testMatPath);
+                Xtest = tdata.embeddings';
+                obj.TestLabels = tdata.labels;
+                obj.TestFilenames = tdata.filenames;
                 obj.TestFeatures = PCA_SVD_Core.project(Xtest, obj.MeanFace, obj.EigenFaces);
                 obj.TestFeatures = obj.TestFeatures ./ obj.FeatureScale;
                 obj.TestFeatures = obj.l2normalize(obj.TestFeatures);
@@ -269,7 +269,6 @@ classdef FaceApp < handle
                 obj.logMsg('未找到 test_data_embeddings.mat，跳过测试集');
             end
 
-            % 估计 Unknown 阈值
             obj.SimThreshold = obj.estimateThreshold();
             obj.logMsg(sprintf('阈值: %.3f', obj.SimThreshold));
 
@@ -296,7 +295,7 @@ classdef FaceApp < handle
             obj.logMsg(sprintf('已选择: %s', fname));
         end
 
-        % ────────── 单图识别 ──────────
+        % ────────── 单图识别（文件方式） ──────────
         function recognizeSingle(obj)
             if isempty(obj.CurrentTestImage) || isempty(obj.DBFeatures)
                 obj.logMsg('请先加载模型并选择图片');
@@ -307,28 +306,35 @@ classdef FaceApp < handle
             drawnow;
             tic;
 
-            % 调 Python 获取 embedding
-            tmpImg = fullfile(tempdir, 'face_rec_tmp.jpg');
-            imwrite(obj.CurrentTestImage, tmpImg);
+            % 把选中的图片复制到项目目录下固定名称（避免中文路径）
+            tmpSrc = fullfile(tempdir, 'face_rec_src.jpg');
+            tmpEmb = fullfile(obj.ProjectDir, '_tmp_emb.txt');
+            imwrite(obj.CurrentTestImage, tmpSrc);
 
-            cmd = sprintf('"%s" "%s" "%s"', obj.PythonExe, obj.EmbeddingScript, tmpImg);
-            [status, result] = system(cmd);
+            % 复制到项目目录（ASCII 路径）
+            tmpImg = fullfile(obj.ProjectDir, '_tmp_rec.jpg');
+            copyfile(tmpSrc, tmpImg);
 
-            if status ~= 0
-                obj.logMsg(sprintf('Python 调用失败: %s', result));
+            % 调 Python：图片路径 + 输出文件路径
+            cmd = sprintf('"%s" "%s" "%s" "%s"', ...
+                obj.PythonExe, obj.SingleEmbScript, tmpImg, tmpEmb);
+            [~, ~] = system(cmd);
+
+            % 从文件读取 embedding
+            embVec = obj.readEmbeddingFile(tmpEmb);
+
+            % 清理临时文件
+            if isfile(tmpImg), delete(tmpImg); end
+            if isfile(tmpEmb), delete(tmpEmb); end
+            if isfile(tmpSrc), delete(tmpSrc); end
+
+            if isempty(embVec)
+                obj.logMsg('Embedding 提取失败');
                 return;
             end
-
-            emb = str2num(strtrim(result)); %#ok<ST2NM>
-            if isempty(emb) || length(emb) ~= 512
-                obj.logMsg('Embedding 维度错误');
-                return;
-            end
-
-            vec = emb(:); % 512 x 1
 
             % PCA 投影
-            testFeat = PCA_SVD_Core.project(vec, obj.MeanFace, obj.EigenFaces);
+            testFeat = PCA_SVD_Core.project(embVec, obj.MeanFace, obj.EigenFaces);
             testFeat = testFeat ./ obj.FeatureScale;
             testFeat = obj.l2normalize(testFeat);
 
@@ -338,13 +344,12 @@ classdef FaceApp < handle
 
             elapsed = toc;
             simScore = max(0, simScore);
-            matchLabel = char(bestLabel);
 
             if simScore < obj.SimThreshold
                 displayLabel = 'Unknown';
                 obj.LabelResult.FontColor = [0.6 0.6 0.6];
             else
-                displayLabel = matchLabel;
+                displayLabel = char(bestLabel);
                 obj.LabelResult.FontColor = [0.1 0.1 0.8];
             end
 
@@ -359,8 +364,6 @@ classdef FaceApp < handle
 
             obj.LabelResult.Text = sprintf('%s  (相似度: %.2f, %.2fs)', displayLabel, simScore, elapsed);
             obj.logMsg(sprintf('识别: %s | 相似度: %.2f | 耗时: %.2fs', displayLabel, simScore, elapsed));
-
-            if isfile(tmpImg), delete(tmpImg); end
         end
 
         % ────────── 批量测试 ──────────
@@ -393,18 +396,10 @@ classdef FaceApp < handle
         % ────────── 摄像头 ──────────
         function toggleCamera(obj)
             if obj.IsCamRunning
-                if ~isempty(obj.CamTimer), stop(obj.CamTimer); delete(obj.CamTimer); obj.CamTimer = []; end
-                if ~isempty(obj.CamObj), tmp = obj.CamObj; obj.CamObj = []; clear tmp; end
-                cla(obj.AxesCamera);
-                title(obj.AxesCamera, '点击「开启摄像头」启动');
-                obj.LabelCamStatus.Text = '摄像头: 关闭';
-                obj.LabelCamStatus.FontColor = [0.4 0.4 0.4];
-                obj.IsCamRunning = false;
-                obj.IsRealTimeEnabled = false;
-                obj.BtnToggleRealTime.Enable = 'off';
-                obj.BtnToggleCam.Text = '5. 开启摄像头';
-                obj.logMsg('摄像头已关闭');
+                % 关闭摄像头
+                obj.stopCamera();
             else
+                % 打开摄像头
                 if exist('webcam', 'file') ~= 2
                     obj.logMsg('未检测到 webcam 支持包');
                     return;
@@ -428,16 +423,44 @@ classdef FaceApp < handle
             end
         end
 
+        function stopCamera(obj)
+            % 关闭实时识别 + 持久进程
+            obj.IsRealTimeEnabled = false;
+            obj.BtnToggleRealTime.Enable = 'off';
+            obj.BtnToggleRealTime.Text = '开启实时识别';
+            obj.stopServer();
+
+            % 关闭摄像头
+            if ~isempty(obj.CamTimer), stop(obj.CamTimer); delete(obj.CamTimer); obj.CamTimer = []; end
+            if ~isempty(obj.CamObj), tmp = obj.CamObj; obj.CamObj = []; clear tmp; end
+            cla(obj.AxesCamera);
+            title(obj.AxesCamera, '点击「开启摄像头」启动');
+            obj.LabelCamStatus.Text = '摄像头: 关闭';
+            obj.LabelCamStatus.FontColor = [0.4 0.4 0.4];
+            obj.IsCamRunning = false;
+            obj.BtnToggleCam.Text = '5. 开启摄像头';
+            obj.logMsg('摄像头已关闭');
+        end
+
         function toggleRealTime(obj)
             if obj.IsRealTimeEnabled
+                % 关闭实时识别
                 obj.IsRealTimeEnabled = false;
                 obj.BtnToggleRealTime.Text = '开启实时识别';
+                obj.stopServer();
                 obj.logMsg('实时识别已关闭');
             else
+                % 启动持久 Python 进程
+                obj.logMsg('正在启动 embedding server...');
+                drawnow;
+                if ~obj.startServer()
+                    obj.logMsg('embedding server 启动失败');
+                    return;
+                end
                 obj.IsRealTimeEnabled = true;
                 obj.BtnToggleRealTime.Text = '关闭实时识别';
                 obj.HistoryLabels = {};
-                obj.logMsg('实时识别已开启');
+                obj.logMsg('实时识别已开启，摄像头已就绪');
             end
         end
 
@@ -455,17 +478,27 @@ classdef FaceApp < handle
         end
 
         function processFrame(obj, img)
-            tmpImg = fullfile(tempdir, 'face_cam_tmp.jpg');
+            % 保存帧到临时文件
+            tmpImg = fullfile(obj.ProjectDir, '_tmp_cam.jpg');
             imwrite(img, tmpImg);
-            cmd = sprintf('"%s" "%s" "%s"', obj.PythonExe, obj.EmbeddingScript, tmpImg);
-            [status, result] = system(cmd);
+
+            % 向持久进程发送路径，读取回复
+            reply = obj.serverQuery(tmpImg);
             if isfile(tmpImg), delete(tmpImg); end
-            if status ~= 0, return; end
 
-            emb = str2num(strtrim(result)); %#ok<ST2NM>
-            if isempty(emb) || length(emb) ~= 512, return; end
+            if isempty(reply) || startsWith(reply, 'error')
+                return;
+            end
 
-            vec = emb(:);
+            % 解析 "ok,0.0012,0.0034,..."
+            parts = split(reply, ',');
+            if length(parts) ~= 513, return; end  % "ok" + 512 floats
+            vals = zeros(512, 1);
+            for k = 1:512
+                vals(k) = str2double(parts{k + 1});
+            end
+
+            vec = vals(:);
             testFeat = PCA_SVD_Core.project(vec, obj.MeanFace, obj.EigenFaces);
             testFeat = testFeat ./ obj.FeatureScale;
             testFeat = obj.l2normalize(testFeat);
@@ -505,6 +538,96 @@ classdef FaceApp < handle
     end
 
     methods (Access = private)
+        % ────── 持久 Python 进程管理 ──────
+        function ok = startServer(obj)
+            % 启动 embedding_server.py 作为子进程
+            ok = false;
+            obj.stopServer();
+
+            cmd = sprintf('"%s" "%s"', obj.PythonExe, obj.ServerScript);
+            try
+                pb = java.lang.ProcessBuilder(java.util.Arrays.asList({'cmd', '/c', cmd}));
+                pb.redirectErrorStream(true);
+                pb.directory(java.io.File(obj.ProjectDir));
+                obj.ServerProc = pb.start();
+
+                % 读取 "ready" 行
+                inStream = obj.ServerProc.getInputStream();
+                reader = java.io.BufferedReader(java.io.InputStreamReader(inStream));
+                readyLine = reader.readLine();
+
+                if ~isempty(readyLine) && contains(char(readyLine), 'ready')
+                    ok = true;
+                end
+            catch e
+                obj.ServerProc = [];
+            end
+        end
+
+        function stopServer(obj)
+            if ~isempty(obj.ServerProc)
+                try
+                    % 发送 quit
+                    outStream = obj.ServerProc.getOutputStream();
+                    writer = java.io.PrintWriter(outStream, true);
+                    writer.println('quit');
+                    writer.flush();
+                    obj.ServerProc.waitFor();
+                catch
+                end
+                try
+                    obj.ServerProc.destroy();
+                catch
+                end
+                obj.ServerProc = [];
+            end
+        end
+
+        function reply = serverQuery(obj, imgPath)
+            % 向持久进程发送图片路径，读取一行回复
+            reply = '';
+            if isempty(obj.ServerProc), return; end
+            try
+                outStream = obj.ServerProc.getOutputStream();
+                writer = java.io.PrintWriter(outStream, true);
+                writer.println(imgPath);
+                writer.flush();
+
+                inStream = obj.ServerProc.getInputStream();
+                reader = java.io.BufferedReader(java.io.InputStreamReader(inStream));
+                line = reader.readLine();
+                if ~isempty(line)
+                    reply = char(line);
+                end
+            catch
+                reply = '';
+            end
+        end
+
+        % ────── 读取 embedding 文件 ──────
+        function vec = readEmbeddingFile(~, filePath)
+            vec = [];
+            if ~isfile(filePath), return; end
+            try
+                raw = fileread(filePath);
+                raw = strtrim(raw);
+                if isempty(raw) || startsWith(raw, 'ERROR')
+                    return;
+                end
+                parts = strsplit(raw, ',');
+                vals = zeros(1, length(parts));
+                for k = 1:length(parts)
+                    vals(k) = str2double(strtrim(parts{k}));
+                end
+                if length(vals) == 512 && all(isfinite(vals))
+                    vec = vals(:); % 512 x 1
+                end
+            catch
+                vec = [];
+            end
+        end
+
+        % ────── 工具函数 ──────
         function F = l2normalize(~, F)
             for i = 1:size(F, 2)
                 n = norm(F(:, i));
