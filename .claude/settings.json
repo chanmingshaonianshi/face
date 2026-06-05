@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(matlab -batch \"eval_pipeline\\('baseline'\\)\")",
+      "Bash(/c/Python311/python.exe -c ' *)",
+      "WebSearch",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}
