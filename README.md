@@ -17,7 +17,7 @@
 
 实时识别流程：
 - **单图识别**：MATLAB 将待识别图片复制到项目目录（避免中文路径问题），调用 `single_embedding.py` 提取 embedding 并写入临时文件，再从文件读取结果
-- **摄像头实时识别**：通过 `embedding_server.py` 启动持久化 Python 子进程（模型只加载一次），MATLAB 通过文件交换协议逐帧通信（`_server_req.txt` / `_server_rep.txt`），彻底避免 stdin 中文编码问题，大幅降低延迟；识别结果在独立深色窗口中显示，主 GUI 同步显示日志状态
+- **摄像头实时识别**：通过 `embedding_server.py` 启动持久化 Python 子进程（模型只加载一次），MATLAB 通过文件交换协议逐帧通信（`_server_req.txt` / `_server_rep.txt`），彻底避免 stdin 中文编码问题，大幅降低延迟；独立深色窗口实时显示摄像头画面和当前帧识别人物，主 GUI 同步显示平滑后的识别状态和日志
 
 当前识别精度：**93.75%**（60/64），可通过调整 PCA 主成分数进一步提升。
 
@@ -100,8 +100,8 @@ untitled
 ### 5.6 摄像头实时识别
 1. 点击 `5. 开启摄像头` 启动预览
 2. 点击 `开启实时识别` 启用人脸识别（自动启动持久化 Python 进程，模型只加载一次）
-3. 识别画面在独立深色窗口中显示，主 GUI 同步显示识别结果
-4. 连续多帧一致时输出稳定结果；Server 无响应时会自动重启（10 秒冷却）
+3. 独立深色窗口实时显示摄像头画面、当前帧识别人物和相似度
+4. 主 GUI 状态栏显示多帧平滑后的稳定结果；Server 无响应时会自动重启（10 秒冷却）
 5. 关闭摄像头、关闭实时识别或关闭独立窗口时，持久进程自动终止
 
 ## 6. PCA 调参
@@ -119,6 +119,11 @@ untitled
 ## 7. 说明
 - 深度 embedding 提取依赖 insightface buffalo_l 模型（275MB），首次使用前需手动下载。
 - .mat embedding 文件已纳入版本管理，无需每次重新提取。
-- GUI 单图识别：调用 `single_embedding.py`，将 embedding 写入临时文件（避免中文路径和 stdout 编码问题），MATLAB 从文件读取。
-- GUI 摄像头实时识别：通过 `embedding_server.py` 启动持久化 Python 子进程（模型只加载一次），MATLAB 通过文件交换协议（`_server_req.txt` / `_server_rep.txt`）逐帧通信，避免 stdin 中文编码问题，大幅降低延迟；识别结果在独立深色窗口中显示。
+- GUI 单图识别：调用 `single_embedding.py`，将 embedding 写入临时文件（避免中文路径和 stdout 编码问题），MATLAB 通过 `readEmbeddingFile` 从文件读取并校验 512 维向量。
+- GUI 摄像头实时识别：通过 `embedding_server.py` 启动持久化 Python 子进程（模型只加载一次），MATLAB 通过文件交换协议（`_server_req.txt` / `_server_rep.txt`）逐帧通信，避免 stdin 中文编码问题，大幅降低延迟；独立窗口每帧刷新画面和当前识别结果，主 GUI 继续显示平滑后的稳定结果。
 - Python 路径硬编码为 `C:\Python311\python.exe`，如需修改请编辑 `FaceApp.m` 第 29 行。
+
+## 8. 最近验证
+- 2026-06-05：修复 GUI 单图识别缺失 `readEmbeddingFile` 导致的临时 embedding 无法读取问题。
+- 2026-06-05：修复摄像头实时识别独立窗口不刷新当前画面/人物名的问题；独立窗口现在每帧更新，主 GUI 保留稳定结果显示。
+- 已使用 `D:\Matlab\bin\matlab.exe` 验证单图识别、实时识别 server 通路和独立窗口模拟帧显示。

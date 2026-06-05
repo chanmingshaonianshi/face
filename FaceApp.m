@@ -480,10 +480,6 @@ classdef FaceApp < handle
                 img = snapshot(obj.CamObj);
 
                 if obj.IsRealTimeEnabled
-                    % 实时识别模式：画面显示在独立窗口
-                    if ~isempty(obj.RealTimeFig) && isvalid(obj.RealTimeFig)
-                        imshow(img, 'Parent', obj.RealTimeAxes);
-                    end
                     obj.processFrame(img);
                 else
                     % 非实时模式：画面显示在原 GUI 预览区
@@ -495,6 +491,8 @@ classdef FaceApp < handle
 
         function processFrame(obj, img)
             if isempty(obj.DBFeatures), return; end
+
+            obj.showRealTimeFrame(img);
 
             % 保存帧到临时文件
             tmpImg = fullfile(obj.ProjectDir, '_tmp_cam.jpg');
@@ -557,6 +555,8 @@ classdef FaceApp < handle
                 curResult = bestLabel;
             end
 
+            obj.updateRealTimeResult(curResult, simScore);
+
             % 平滑结果
             obj.HistoryLabels{end+1} = curResult;
             if length(obj.HistoryLabels) > obj.SmoothFrames
@@ -572,8 +572,6 @@ classdef FaceApp < handle
                     stableResult = uniqueL{idx};
                     obj.LabelCamStatus.Text = sprintf('识别: %s (%.2f)', stableResult, simScore);
                     obj.LabelCamStatus.FontColor = [0.8 0.1 0.1];
-                    % 更新独立窗口结果
-                    obj.updateRealTimeResult(stableResult, simScore);
                 else
                     obj.LabelCamStatus.Text = '识别中...';
                     obj.LabelCamStatus.FontColor = [0.1 0.1 0.8];
@@ -617,6 +615,18 @@ classdef FaceApp < handle
                 'Position', [10, 8, 780, 22], ...
                 'FontSize', 11, 'FontColor', [0.7 0.7 0.7], ...
                 'HorizontalAlignment', 'center');
+        end
+
+        function showRealTimeFrame(obj, img)
+            if isempty(obj.RealTimeFig) || ~isvalid(obj.RealTimeFig)
+                return;
+            end
+
+            try
+                imshow(img, 'Parent', obj.RealTimeAxes);
+                drawnow limitrate;
+            catch
+            end
         end
 
         function closeRealTimeWindow(obj)
@@ -752,6 +762,35 @@ classdef FaceApp < handle
                 reply = '';
             end
         end
+
+        function vec = readEmbeddingFile(~, filePath)
+            vec = [];
+            if ~isfile(filePath), return; end
+
+            try
+                raw = strtrim(fileread(filePath));
+                if isempty(raw) || startsWith(raw, 'ERROR')
+                    return;
+                end
+
+                parts = strsplit(raw, ',');
+                if numel(parts) ~= 512
+                    return;
+                end
+
+                vals = zeros(512, 1);
+                for k = 1:512
+                    vals(k) = str2double(strtrim(parts{k}));
+                end
+
+                if all(isfinite(vals))
+                    vec = vals;
+                end
+            catch
+                vec = [];
+            end
+        end
+
         function F = l2normalize(~, F)
             for i = 1:size(F, 2)
                 n = norm(F(:, i));
